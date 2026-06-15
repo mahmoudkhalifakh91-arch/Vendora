@@ -1,0 +1,6 @@
+{
+  "name": "Vendora",
+  "description": "Vendora is a modern, professional, and responsive bilingual (Arabic/English) multi-vendor e-commerce marketplace featuring streamlined agricultural feed, veterinary supply, consumer products, and spare parts commerce, integrated direct order tracking, and interactive provider panels.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,219 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Hardened Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function hasRole(role) {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == role;
+    }
+
+    function isAdmin() { return hasRole('ADMIN'); }
+    function isOperator() { return hasRole('OPERATOR'); }
+    function isStaff() { 
+      return (isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email == 'sadat.planning.officer@dakahlia.net') || isAdmin() || isOperator();
+    }
+    function isDriver() { return hasRole('DRIVER'); }
+    function isApproved() { return getUserData().status == 'APPROVED'; }
+    
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // --- Validation Blueprints ---
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'email', 'phone', 'name', 'role', 'status'])
+        && data.id == request.auth.uid
+        && data.email is string && data.email.size() < 256
+        && data.phone is string && data.phone.size() < 32
+        && data.name is string && data.name.size() < 128
+        && data.role in ['ADMIN', 'OPERATOR', 'DRIVER', 'CUSTOMER']
+        && data.status in ['PENDING_APPROVAL', 'APPROVED', 'SUSPENDED']
+        && (data.keys().size() <= 20);
+    }
+
+    function isTerminalState(status) {
+      return status in ['DELIVERED_RATED', 'CANCELLED'];
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['customerId', 'status', 'createdAt', 'updatedAt', 'price'])
+        && (data.customerId == 'guest_customer_user' || data.customerId == 'vendora-customer' || (isSignedIn() && data.customerId == request.auth.uid))
+        && data.status in ['DRAFT', 'PENDING', 'ASSIGNED', 'PICKED', 'IN_DELIVERY', 'DELIVERED', 'CANCELLED', 'WAITING_FOR_OFFERS', 'ACCEPTED', 'PICKED_UP', 'DELIVERED_RATED']
+        && data.price is number && data.price >= 0
+        && data.createdAt is number
+        && data.updatedAt is number
+        && (data.keys().size() <= 60);
+    }
+
+    function isValidOffer(data) {
+      return data.keys().hasAll(['orderId', 'driverId', 'price', 'createdAt'])
+        && data.driverId == request.auth.uid
+        && data.price is number && data.price >= 0
+        && data.createdAt is number
+        && isValidId(data.orderId)
+        && exists(/databases/$(database)/documents/orders/$(data.orderId));
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['orderId', 'senderId', 'createdAt'])
+        && data.senderId == request.auth.uid
+        && data.createdAt is number
+        && isValidId(data.orderId)
+        && exists(/databases/$(database)/documents/orders/$(data.orderId));
+    }
+
+    // --- Collection Routes ---
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isStaff() || (isSignedIn() && existing().role == 'DRIVER'));
+      allow list: if isSignedIn() && (isOwner(resource.data.id) || isStaff() || resource.data.role == 'DRIVER');
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && (
+        (incoming().role == 'CUSTOMER' && incoming().status == 'APPROVED') ||
+        (incoming().role == 'DRIVER' && incoming().status == 'PENDING_APPROVAL')
+      );
+      allow update: if isValidId(userId) && (
+        (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'photoURL', 'location', 'wallet', 'plateNumber', 'vehicleType'])) 
+        || isStaff()
+      );
+    }
+
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && (
+        !isSignedIn() || 
+        isOwner(existing().customerId) || 
+        existing().customerId == 'guest_customer_user' ||
+        existing().customerId == 'vendora-customer' ||
+        isOwner(existing().driverId) ||
+        existing().status == 'PENDING' ||
+        existing().status == 'WAITING_FOR_OFFERS' ||
+        isStaff()
+      );
+      allow list: if !isSignedIn() || (
+        resource.data.customerId == request.auth.uid || 
+        resource.data.customerId == 'guest_customer_user' ||
+        resource.data.customerId == 'vendora-customer' ||
+        resource.data.driverId == request.auth.uid ||
+        resource.data.status == 'PENDING' ||
+        resource.data.status == 'WAITING_FOR_OFFERS' ||
+        isStaff()
+      );
+      
+      allow create: if isValidId(orderId) && isValidOrder(incoming()) && (
+        incoming().customerId == 'guest_customer_user' ||
+        incoming().customerId == 'vendora-customer' ||
+        (isSignedIn() && (isOwner(incoming().customerId) || isStaff()))
+      );
+      
+      allow update: if isValidId(orderId) && (
+        !isSignedIn() ||
+        isStaff() ||
+        (
+          !isTerminalState(existing().status) && (
+            (existing().customerId == 'guest_customer_user' || existing().customerId == 'vendora-customer' || isOwner(existing().customerId)) && (
+              (incoming().status == 'CANCELLED' && (existing().status == 'PENDING' || existing().status == 'WAITING_FOR_OFFERS' || existing().status == 'ACCEPTED')) ||
+              (incoming().status == 'DELIVERED_RATED' && existing().status == 'DELIVERED')
+            ) ||
+            (isOwner(existing().driverId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt', 'statusHistory', 'deliveredAt', 'pickedUpAt', 'acceptedAt']))
+          )
+        )
+      );
+    }
+
+    match /offers/{offerId} {
+      allow get: if isValidId(offerId) && isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isValidId(offerId) && isDriver() && isApproved() && isValidOffer(incoming());
+      allow delete: if isValidId(offerId) && (isOwner(existing().driverId) || isStaff());
+    }
+
+    match /messages/{msgId} {
+      allow get: if isValidId(msgId) && isSignedIn() && (
+        isOwner(existing().senderId) || 
+        isOwner(get(/databases/$(database)/documents/orders/$(existing().orderId)).data.customerId) ||
+        isOwner(get(/databases/$(database)/documents/orders/$(existing().orderId)).data.driverId) ||
+        isStaff()
+      );
+      allow list: if isSignedIn(); // Each message query should have a where(orderId) which will be checked by per-doc evaluation or list rule
+      allow create: if isValidId(msgId) && isSignedIn() && isValidMessage(incoming()) && (
+        isOwner(get(/databases/$(database)/documents/orders/$(incoming().orderId)).data.customerId) ||
+        isOwner(get(/databases/$(database)/documents/orders/$(incoming().orderId)).data.driverId) ||
+        isStaff()
+      );
+    }
+
+
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && (
+        isOwner(existing().userId) ||
+        existing().userId == 'guest_customer_user' ||
+        existing().userId == 'ALL' ||
+        existing().userId == 'CUSTOMER'
+      );
+      allow list: if !isSignedIn() ? (
+        resource.data.userId == 'guest_customer_user' ||
+        resource.data.userId == 'ALL' ||
+        resource.data.userId == 'CUSTOMER'
+      ) : (
+        resource.data.userId == request.auth.uid ||
+        resource.data.userId == 'ALL' ||
+        resource.data.userId == getUserData().role
+      );
+      allow write: if isValidId(notifId) && isStaff();
+    }
+
+    match /restaurants/{restId} {
+      allow get: if isValidId(restId);
+      allow list: if true;
+      allow write: if isValidId(restId) && isStaff();
+    }
+
+    match /ads/{adId} {
+      allow get: if isValidId(adId);
+      allow list: if true;
+      allow write: if isValidId(adId) && isStaff();
+    }
+
+    match /geo_config/{geoId} {
+      allow get: if isValidId(geoId);
+      allow list: if true;
+      allow write: if isValidId(geoId) && isAdmin();
+    }
+
+    match /feedback/{feedId} {
+      allow get: if isValidId(feedId) && isStaff();
+      allow list: if isStaff();
+      allow create: if isValidId(feedId) && isSignedIn();
+    }
+
+    match /transactions/{transId} {
+      allow get: if isValidId(transId) && isSignedIn() && (isOwner(existing().userId) || isStaff());
+      allow list: if isSignedIn() && (isOwner(resource.data.userId) || isStaff());
+      allow write: if isValidId(transId) && isAdmin();
+    }
+
+    match /payment_requests/{requestId} {
+      allow get: if isValidId(requestId) && isSignedIn() && (isOwner(existing().userId) || isStaff());
+      allow list: if isSignedIn() && (isOwner(resource.data.userId) || isStaff());
+      allow create: if isValidId(requestId) && isDriver() && isApproved();
+      allow update: if isValidId(requestId) && isStaff();
+    }
+    
+    match /couriers/{courierId} {
+      allow get: if isValidId(courierId) && isSignedIn();
+      allow list: if isSignedIn();
+      allow write: if isValidId(courierId) && isStaff();
+    }
+
+  }
+}
