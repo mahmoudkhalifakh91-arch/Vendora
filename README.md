@@ -1,20 +1,12 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# المصرية الهندسية – متجر قطع غيار الغلايات
 
-# Run and deploy your AI Studio app
+موقع كتالوج وطلب: العميل يختار القطع → السلة → "إتمام الشراء" يفتح واتساب (01065019364) برسالة فيها كل بيانات الطلب.
 
-This contains everything you need to run your app locally.
+## التشغيل
+    npm install
+    npm run dev      # تطوير
+    npm run build    # بناء للنشر (مجلد dist)
 
-View your app in AI Studio: https://ai.studio/apps/c29f3f7c-3406-44da-a981-fd757fe8c5eb
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## التعديل
+- `src/config.ts`: اسم المتجر، رقم الواتساب، العنوان، الأقسام.
+- `src/data/products.ts`: المنتجات والأسعار. لإضافة صورة حقيقية أضف `image: 'https://...'` للمنتج.
